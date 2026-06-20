@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "handelsregister-mcp"
+version = "0.1.0"
+description = "Open-source MCP server for the German commercial register (handelsregister.de) — let agents search companies and retrieve register documents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "handelsregister-mcp contributors" }]
+keywords = ["mcp", "model-context-protocol", "handelsregister", "germany", "commercial-register", "openregister"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "mechanize>=0.4.9",
+    "beautifulsoup4>=4.12.0",
+    "pypdf>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/your-org/handelsregister-mcp"
+Issues = "https://github.com/your-org/handelsregister-mcp/issues"
+
+[project.scripts]
+handelsregister-mcp = "handelsregister_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/handelsregister_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

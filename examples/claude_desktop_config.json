@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "handelsregister": {
+      "command": "handelsregister-mcp",
+      "env": {
+        "HANDELSREGISTER_MAX_PER_HOUR": "60",
+        "HANDELSREGISTER_DOWNLOAD_DIR": "/tmp/handelsregister"
+      }
+    }
+  }
+}
