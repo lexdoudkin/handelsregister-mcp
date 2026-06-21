@@ -4,6 +4,7 @@
 
 Give your AI agents first-class access to official German company data: search the register, read register extracts with management and capital, list filed documents, and pull the **shareholder list (Gesellschafterliste)** — all returned as **structured data and tables**, not raw HTML.
 
+[![CI](https://github.com/lexdoudkin/handelsregister-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/lexdoudkin/handelsregister-mcp/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-server-000000.svg)](https://modelcontextprotocol.io)
