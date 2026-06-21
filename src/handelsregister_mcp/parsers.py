@@ -345,8 +345,15 @@ def parse_gesellschafterliste(text: str) -> dict:
             "percent": (percents[-1] + "%") if percents else None,
         })
 
-    # If the standard template wasn't found, fall back to a loose name+amount scan.
-    confidence = "high" if shareholders else "low"
+    # Sanity check: a clean parse has one tidy identity per data row. If a name
+    # absorbed a register number or runs very long, the layout was likely garbled
+    # (typical of OCR'd scans whose reading order differs from the visual table) —
+    # flag it low so callers fall back to raw_text instead of trusting the table.
+    garbled = any(
+        s["shareholder"] and (len(s["shareholder"]) > 70 or _REGISTER_RE.search(s["shareholder"]))
+        for s in shareholders
+    )
+    confidence = "high" if (shareholders and not garbled) else "low"
     return {
         "list_date": _iso_date(joined),
         "stammkapital_eur": stammkapital,

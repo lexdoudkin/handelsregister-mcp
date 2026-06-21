@@ -65,6 +65,31 @@ register, is accessed via `list_filed_documents` / `get_shareholders` / `fetch_f
 > separately filed Gesellschafterliste, which `get_shareholders` downloads and parses. Layouts
 > vary by notary; the parser flags `confidence: "low"` and returns `raw_text` when unsure.
 
+## OCR (scanned / image-only documents)
+
+Newer filings are "digitally born" and have a text layer that `pypdf` reads directly. Older or
+scanned documents (many Gesellschafterlisten, annual accounts, pre-digital articles) are
+**image-only PDFs with no text layer**. For those, the server falls back to **OCR** (Tesseract,
+German), so document tools still return text. The result carries `text_source: "text-layer" | "ocr" | "none"`.
+
+OCR is an **optional extra** (kept out of the core install):
+
+```bash
+pip install "handelsregister-mcp[ocr]"          # python libs (pymupdf, pytesseract, Pillow)
+brew install tesseract tesseract-lang           # the Tesseract binary + language packs (macOS)
+```
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `HANDELSREGISTER_OCR` | `auto` | `auto` (OCR only when the text layer is empty), `always`, or `off`. |
+| `HANDELSREGISTER_OCR_LANG` | `deu` | Tesseract language(s), e.g. `deu+eng`. |
+
+**Caveat — OCR recovers *text*, not table *structure*.** A scanned page is read in a different
+spatial order than a digital one, so the shareholder-table parser can't reliably reconstruct
+columns from OCR output. When it detects this it sets `confidence: "low"` and returns `raw_text`,
+leaving the final extraction to the calling model rather than emitting a confidently-wrong table.
+(Coordinate-based table reconstruction via Tesseract TSV is a possible future improvement.)
+
 ## ⚠️ Legal & rate limits — read this
 
 - The portal's **Nutzungsordnung** (terms of use, per **§9 HGB**) forbids **more than 60

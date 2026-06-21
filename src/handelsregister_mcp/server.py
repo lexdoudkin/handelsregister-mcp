@@ -241,7 +241,8 @@ def get_shareholders(company: str, which: str = "latest", match: str = "exact") 
     parsed = parse_gesellschafterliste(doc.get("text", ""))
     return {
         "company": target,
-        "source_document": {"label": chosen["label"], "date": chosen["date"], "path": doc["path"]},
+        "source_document": {"label": chosen["label"], "date": chosen["date"],
+                            "path": doc["path"], "text_source": doc.get("text_source")},
         "stammkapital_eur": parsed["stammkapital_eur"],
         "shareholders": parsed["shareholders"],
         "confidence": parsed["confidence"],

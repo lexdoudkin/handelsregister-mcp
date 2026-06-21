@@ -24,6 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# OCR fallback for scanned/image-only PDFs. Also needs the system Tesseract binary
+# and its German language pack (e.g. `brew install tesseract tesseract-lang`).
+ocr = ["pymupdf>=1.24", "pytesseract>=0.3.10", "Pillow>=10.0"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.urls]

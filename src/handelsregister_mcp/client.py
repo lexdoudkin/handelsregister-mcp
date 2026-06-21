@@ -19,6 +19,7 @@ The search flow is adapted from the community project bundesAPI/handelsregister
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import time
@@ -28,9 +29,15 @@ from urllib.parse import urlencode, urljoin
 import mechanize
 from bs4 import BeautifulSoup
 
+from .ocr import ocr_available, ocr_pdf
 from .parsers import parse_register_extract, parse_xjustiz_si
 
 BASE_URL = "https://www.handelsregister.de"
+
+# OCR behaviour: "auto" (OCR only when the text layer is empty/sparse), "always",
+# or "off". German is the default OCR language for register documents.
+_OCR_MODE = os.environ.get("HANDELSREGISTER_OCR", "auto").lower()
+_OCR_LANG = os.environ.get("HANDELSREGISTER_OCR_LANG", "deu")
 
 # keyword match mode -> portal radio value
 KEYWORD_OPTIONS = {
@@ -209,11 +216,12 @@ class HandelsregisterClient:
             "size_bytes": len(data),
         }
         if ext == ".pdf":
-            result["text"] = _extract_pdf_text(path)
+            result["text"], result["text_source"] = _pdf_text(path)
             if document_type in ("AD", "CD", "HD"):
                 result["structured"] = parse_register_extract(result["text"])
         elif ext in (".xml", ".txt"):
             result["text"] = data.decode("utf-8", errors="replace")
+            result["text_source"] = "text-layer"
             if document_type == "SI":
                 result["structured"] = parse_xjustiz_si(result["text"])
         return result
@@ -364,9 +372,10 @@ class HandelsregisterClient:
             "path": str(path), "size_bytes": len(data),
         }
         if ext == ".pdf":
-            result["text"] = _extract_pdf_text(path)
+            result["text"], result["text_source"] = _pdf_text(path)
         elif ext in (".xml", ".txt"):
             result["text"] = data.decode("utf-8", errors="replace")
+            result["text_source"] = "text-layer"
         return result
 
     # ----------------------------------------------------------------- parsing
@@ -462,10 +471,32 @@ def _guess_extension(content_type: str, disposition: str) -> str:
 
 
 def _extract_pdf_text(path: Path) -> str:
+    """Text-layer extraction only (no OCR). Returns '' on failure."""
     try:
         from pypdf import PdfReader
 
         reader = PdfReader(str(path))
         return "\n".join(page.extract_text() or "" for page in reader.pages).strip()
-    except Exception as exc:  # noqa: BLE001 - best-effort text extraction
-        return f"(could not extract PDF text: {exc})"
+    except Exception:  # noqa: BLE001 - best-effort text extraction
+        return ""
+
+
+def _pdf_text(path: Path) -> tuple[str, str]:
+    """Extract PDF text, OCR-ing scanned/image-only PDFs when needed.
+
+    Returns (text, source) where source is 'text-layer', 'ocr', or 'none'.
+    Honours HANDELSREGISTER_OCR (auto|always|off) and HANDELSREGISTER_OCR_LANG.
+    """
+    text = _extract_pdf_text(path)
+    sparse = len(re.sub(r"\s", "", text)) < 40  # essentially no real text -> scanned
+
+    if _OCR_MODE != "off" and (_OCR_MODE == "always" or sparse):
+        available, _ = ocr_available()
+        if available:
+            try:
+                ocr_text = ocr_pdf(path, lang=_OCR_LANG)
+            except Exception:  # noqa: BLE001 - OCR is a best-effort fallback
+                ocr_text = ""
+            if len(ocr_text) > len(text):
+                return ocr_text, "ocr"
+    return text, ("text-layer" if text else "none")
