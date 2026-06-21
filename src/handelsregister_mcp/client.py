@@ -23,9 +23,12 @@ import re
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlencode, urljoin
 
 import mechanize
 from bs4 import BeautifulSoup
+
+from .parsers import parse_register_extract, parse_xjustiz_si
 
 BASE_URL = "https://www.handelsregister.de"
 
@@ -204,6 +207,161 @@ class HandelsregisterClient:
             "content_type": content_type or "application/octet-stream",
             "path": str(path),
             "size_bytes": len(data),
+        }
+        if ext == ".pdf":
+            result["text"] = _extract_pdf_text(path)
+            if document_type in ("AD", "CD", "HD"):
+                result["structured"] = parse_register_extract(result["text"])
+        elif ext in (".xml", ".txt"):
+            result["text"] = data.decode("utf-8", errors="replace")
+            if document_type == "SI":
+                result["structured"] = parse_xjustiz_si(result["text"])
+        return result
+
+    # ----------------------------------------------- document register (DK)
+
+    def _open_document_register(self, row_index: int):
+        """Click a row's DK link and land on the document-register page (dk_form).
+
+        Returns (soup, action_url, view_state, download_button_name).
+        """
+        controls = self._doc_controls.get(row_index)
+        if not controls or "DK" not in controls:
+            raise RegisterError(f"row {row_index} has no DK (document register) link")
+        self.browser.select_form(name="ergebnissForm")
+        self.browser.form.new_control("hidden", "javax.faces.source", {"value": controls["DK"]})
+        self.browser.form.new_control("hidden", controls["DK"], {"value": controls["DK"]})
+        html = self.browser.submit().read().decode("utf-8", errors="replace")
+        soup = BeautifulSoup(html, "html.parser")
+        form = soup.find("form", id="dk_form")
+        if form is None:
+            raise RegisterError("could not open the document register page")
+        action = urljoin(self.browser.geturl(), form.get("action"))
+        vs = soup.find("input", {"name": "javax.faces.ViewState"})
+        button = None
+        for b in form.find_all("button"):
+            if re.search(r"download|herunterladen", b.get_text(), re.I) and b.get("name"):
+                button = b["name"]
+                break
+        if button is None:  # fall back to the form's submit button
+            sub = form.find("button", attrs={"type": "submit"}) or form.find("button")
+            button = sub.get("name") if sub else "dk_form:j_idt205"
+        return soup, action, (vs["value"] if vs is not None else ""), button
+
+    def list_filed_documents(self, row_index: int = 0) -> dict:
+        """List the documents filed for a company, grouped by category.
+
+        Returns e.g. {"List of shareholders": [{"rowkey","label","date"}...],
+        "Articles of Association / Rules / Statute": [...], ...}. Walks the lazy
+        PrimeFaces document tree via AJAX (read-only).
+        """
+        _, action, vs, _ = self._open_document_register(row_index)
+
+        def _post(params):
+            req = mechanize.Request(
+                action, data=urlencode(params).encode("utf-8"),
+                headers={"Faces-Request": "partial/ajax", "X-Requested-With": "XMLHttpRequest",
+                         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+            )
+            return self.browser.open(req).read().decode("utf-8", errors="replace")
+
+        def _expand(node: str, view_state: str):
+            raw = _post({
+                "javax.faces.partial.ajax": "true", "javax.faces.source": "dk_form:dktree",
+                "javax.faces.partial.execute": "dk_form:dktree", "javax.faces.partial.render": "dk_form:dktree",
+                "javax.faces.behavior.event": "expand", "javax.faces.partial.event": "expand",
+                "dk_form:dktree_expandNode": node, "dk_form": "dk_form", "javax.faces.ViewState": view_state,
+            })
+            tree = re.findall(r'id="dk_form:dktree"><!\[CDATA\[(.*?)\]\]>', raw, re.S)
+            nv = re.search(r"ViewState[^>]*><!\[CDATA\[(.*?)\]\]>", raw)
+            return (tree[0] if tree else ""), (nv.group(1) if nv else view_state)
+
+        def _nodes(html: str):
+            soup = BeautifulSoup(html, "html.parser")
+            out = []
+            for n in soup.select("li[data-rowkey]"):
+                label = n.select_one(".ui-treenode-label")
+                out.append((n.get("data-rowkey"), label.get_text(strip=True) if label else ""))
+            return out
+
+        _, vs = _expand("0", vs)              # Documents on legal entity
+        cats_html, vs = _expand("0_0", vs)    # Documents on register number
+        catalog: dict[str, list[dict]] = {}
+        for rowkey, label in _nodes(cats_html):
+            leaves_html, vs = _expand(rowkey, vs)
+            docs = []
+            for lrk, llabel in _nodes(leaves_html):
+                d = re.search(r"(\d{2})[/.](\d{2})[/.](\d{4})", llabel)
+                docs.append({
+                    "rowkey": lrk, "label": llabel,
+                    "date": f"{d.group(3)}-{d.group(2)}-{d.group(1)}" if d else None,
+                })
+            catalog[label] = docs
+        return catalog
+
+    def _set_if_present(self, name: str, value) -> None:
+        try:
+            self.browser[name] = value
+        except (mechanize.ControlNotFoundError, ValueError):
+            pass
+
+    def _select_stream_radio(self) -> None:
+        """Pick the format option that streams the file (radio value 'false')."""
+        try:
+            self.browser["dk_form:radio_dkbuttons"] = ["false"]
+            return
+        except Exception:  # noqa: BLE001 - item may be disabled; force-enable it
+            try:
+                ctrl = self.browser.find_control("dk_form:radio_dkbuttons")
+                for item in ctrl.items:
+                    item.disabled = False
+                self.browser["dk_form:radio_dkbuttons"] = ["false"]
+            except Exception:  # noqa: BLE001
+                pass
+
+    def download_filed_document(self, row_index: int, rowkey: str) -> dict:
+        """Download one filed document by its tree rowkey (from list_filed_documents).
+
+        Two-step submit on a fresh document-register page: the first submit registers
+        the tree selection (the format radio is disabled until then); the second picks
+        the streaming option and downloads the file.
+        """
+        _, _, _, button = self._open_document_register(row_index)
+
+        # Submit 1 — register the selected document.
+        self.browser.select_form(name="dk_form")
+        try:
+            self.browser.find_control("dk_form:dktree_selection")
+        except mechanize.ControlNotFoundError:
+            self.browser.form.new_control("hidden", "dk_form:dktree_selection", {"value": ""})
+        self.browser.form.set_all_readonly(False)
+        self.browser["dk_form:dktree_selection"] = rowkey
+        self._set_if_present("dk_form:dktree_scrollState", "0,0")
+        self.browser.submit(name=button)
+
+        # Submit 2 — choose the streaming format (now enabled) and download.
+        self.browser.select_form(name="dk_form")
+        self.browser.form.set_all_readonly(False)
+        self._set_if_present("dk_form:dktree_selection", rowkey)
+        self._set_if_present("dk_form:dktree_scrollState", "0,0")
+        self._select_stream_radio()
+        response = self.browser.submit(name=button)
+        data = response.read()
+        info = response.info()
+        content_type = info.get("Content-Type", "")
+        disposition = info.get("Content-Disposition", "")
+        if b"%PDF" not in data[:2000] and "attachment" not in disposition.lower() and b"<html" in data[:400].lower():
+            raise RegisterError(
+                "document register returned a page instead of a file — the document "
+                "may be unavailable, or the portal markup changed."
+            )
+
+        ext = _guess_extension(content_type, disposition)
+        path = self.download_dir / f"filed_{rowkey}_{int(time.time())}{ext}"
+        path.write_bytes(data)
+        result = {
+            "rowkey": rowkey, "content_type": content_type or "application/octet-stream",
+            "path": str(path), "size_bytes": len(data),
         }
         if ext == ".pdf":
             result["text"] = _extract_pdf_text(path)

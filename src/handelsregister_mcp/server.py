@@ -17,11 +17,18 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+import re
+
 from .client import (
     DOCUMENT_TYPES,
     KEYWORD_OPTIONS,
     HandelsregisterClient,
     RegisterError,
+)
+from .parsers import (
+    company_to_markdown,
+    parse_gesellschafterliste,
+    to_markdown_table,
 )
 from .ratelimit import RateLimiter, RateLimitError
 
@@ -123,6 +130,9 @@ def fetch_document(keywords: str, document_type: str = "AD", match: str = "exact
     document_type = document_type.upper()
     if document_type not in DOCUMENT_TYPES:
         return {"error": f"document_type must be one of {sorted(DOCUMENT_TYPES)}"}
+    if document_type == "DK":
+        return {"error": "DK is the filed-documents register, not a single file. "
+                "Use list_filed_documents, fetch_filed_document, or get_shareholders."}
     try:
         _limiter.check_and_consume()
     except RateLimitError as exc:
@@ -147,7 +157,158 @@ def fetch_document(keywords: str, document_type: str = "AD", match: str = "exact
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Document download failed: {exc}", "company": target}
 
+    # Render the structured fields as an inline table for the agent.
+    if document.get("structured"):
+        s = document["structured"]
+        document["markdown"] = company_to_markdown(s) if "management" in s else \
+            to_markdown_table(s.get("parties", []), ["type", "role", "name", "date_of_birth", "city"])
     return {"company": target, "document": document, "rate_limit": _limiter.status()}
+
+
+@mcp.tool()
+def list_filed_documents(company: str, match: str = "exact", result_index: int = 0) -> dict:
+    """List the documents filed for a company in the DK document register.
+
+    Returns the filed documents grouped by category — e.g. "List of shareholders",
+    "Articles of Association / Rules / Statute", "Annual accounts / balance sheet" —
+    each with the available dated entries. Use the category + `fetch_filed_document`
+    (or `get_shareholders`) to download a specific one.
+    """
+    try:
+        _limiter.check_and_consume()
+    except RateLimitError as exc:
+        return {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds}
+
+    client = _new_client()
+    try:
+        results = client.search(company, match=match)
+        if not results:
+            return {"error": f"No company found for {company!r} (match={match})."}
+        catalog = client.list_filed_documents(results[result_index]["row_index"])
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Could not list filed documents: {exc}"}
+    return {"company": results[result_index], "filed_documents": catalog,
+            "rate_limit": _limiter.status()}
+
+
+@mcp.tool()
+def get_shareholders(company: str, which: str = "latest", match: str = "exact") -> dict:
+    """Retrieve a company's shareholders (Gesellschafterliste) as a structured table.
+
+    Finds the company, locates the filed shareholder list (newest by default, or
+    `which="oldest"`), downloads it, and parses it into rows of
+    {shareholder, type, register, city, shares, nominal_total_eur, percent}.
+
+    Shareholders are NOT in the register extract for a GmbH/UG — they live only in
+    this separately filed list, so this is the authoritative source. Layout varies
+    by notary; `confidence` flags low-certainty parses and `raw_text` is included.
+    """
+    try:
+        _limiter.check_and_consume()  # discovery
+    except RateLimitError as exc:
+        return {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds}
+
+    discover = _new_client()
+    try:
+        results = discover.search(company, match=match)
+        if not results:
+            return {"error": f"No company found for {company!r} (match={match})."}
+        target = results[0]
+        catalog = discover.list_filed_documents(target["row_index"])
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Could not open the document register: {exc}"}
+
+    category = next((k for k in catalog if re.search(r"shareholder|gesellschafter", k, re.I)), None)
+    docs = catalog.get(category or "", [])
+    if not docs:
+        return {"error": "No shareholder list is filed for this company.",
+                "company": target, "available_categories": list(catalog)}
+    docs = sorted(docs, key=lambda d: d.get("date") or "", reverse=(which != "oldest"))
+    chosen = docs[0]
+
+    try:
+        _limiter.check_and_consume()  # download
+    except RateLimitError as exc:
+        return {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds}
+
+    fetcher = _new_client()
+    try:
+        fetcher.search(company, match=match)
+        doc = fetcher.download_filed_document(target["row_index"], chosen["rowkey"])
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Could not download the shareholder list: {exc}", "company": target}
+
+    parsed = parse_gesellschafterliste(doc.get("text", ""))
+    return {
+        "company": target,
+        "source_document": {"label": chosen["label"], "date": chosen["date"], "path": doc["path"]},
+        "stammkapital_eur": parsed["stammkapital_eur"],
+        "shareholders": parsed["shareholders"],
+        "confidence": parsed["confidence"],
+        "markdown": to_markdown_table(
+            parsed["shareholders"],
+            ["shareholder", "type", "register", "city", "shares", "nominal_total_eur", "percent"],
+        ) if parsed["shareholders"] else None,
+        "raw_text": parsed["raw_text"] if parsed["confidence"] == "low" else None,
+        "rate_limit": _limiter.status(),
+    }
+
+
+@mcp.tool()
+def fetch_filed_document(company: str, category: str, which: str = "latest",
+                         match: str = "exact") -> dict:
+    """Download a filed document of a given category from the DK document register.
+
+    `category` is matched case-insensitively as a substring against the categories
+    from `list_filed_documents` (e.g. "shareholders", "articles", "annual"). Returns
+    the local path and extracted text; for shareholder lists it also parses the table.
+    """
+    try:
+        _limiter.check_and_consume()  # discovery
+    except RateLimitError as exc:
+        return {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds}
+
+    discover = _new_client()
+    try:
+        results = discover.search(company, match=match)
+        if not results:
+            return {"error": f"No company found for {company!r} (match={match})."}
+        target = results[0]
+        catalog = discover.list_filed_documents(target["row_index"])
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Could not open the document register: {exc}"}
+
+    key = next((k for k in catalog if category.lower() in k.lower()), None)
+    docs = catalog.get(key or "", [])
+    if not docs:
+        return {"error": f"No filed documents in a category matching {category!r}.",
+                "company": target, "available_categories": list(catalog)}
+    docs = sorted(docs, key=lambda d: d.get("date") or "", reverse=(which != "oldest"))
+    chosen = docs[0]
+
+    try:
+        _limiter.check_and_consume()  # download
+    except RateLimitError as exc:
+        return {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds}
+
+    fetcher = _new_client()
+    try:
+        fetcher.search(company, match=match)
+        doc = fetcher.download_filed_document(target["row_index"], chosen["rowkey"])
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Could not download the document: {exc}", "company": target}
+
+    out = {"company": target, "category": key,
+           "source_document": {"label": chosen["label"], "date": chosen["date"]},
+           "document": doc, "rate_limit": _limiter.status()}
+    if re.search(r"shareholder|gesellschafter", key or "", re.I) and doc.get("text"):
+        parsed = parse_gesellschafterliste(doc["text"])
+        out["shareholders"] = parsed["shareholders"]
+        out["markdown"] = to_markdown_table(
+            parsed["shareholders"],
+            ["shareholder", "type", "register", "city", "shares", "nominal_total_eur", "percent"],
+        ) if parsed["shareholders"] else None
+    return out
 
 
 @mcp.tool()

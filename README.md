@@ -23,30 +23,47 @@ Since **1 August 2022** (the DiRUG law) both searches and document downloads are
 
 ## Tools
 
+Every tool returns **structured data** — search rows, parsed company fields, and
+shareholder/management **tables** — not raw document dumps. Document tools also include
+a ready-to-render `markdown` table and keep the source text for verification.
+
 | Tool | What it does |
 |------|--------------|
 | `search_company(keywords, match="all", max_results=20)` | Search by name/keywords. `match` ∈ `all` \| `min` \| `exact`. Supports `*` and `?` wildcards. |
 | `get_company(name)` | Exact-name lookup; returns the single best match. |
-| `fetch_document(keywords, document_type="AD", match="exact", result_index=0)` | Download an extract/document and return its extracted text + local path. |
+| `get_shareholders(company, which="latest")` | **Shareholders as a table** — finds & downloads the filed Gesellschafterliste and parses `{shareholder, type, register, city, shares, nominal_total_eur, percent}`. |
+| `list_filed_documents(company)` | List everything filed in the DK register, grouped by category (shareholder lists, articles of association, annual accounts, …) with dates. |
+| `fetch_filed_document(company, category, which="latest")` | Download any filed document by category and return its text (+ shareholder table for share lists). |
+| `fetch_document(keywords, document_type="AD", ...)` | Download a register extract. `AD`/`CD`/`HD` return parsed company fields + management table; `SI` returns parsed XJustiz data. |
 | `rate_limit_status()` | Remaining requests in the current hour. |
 
 **Document types:** `AD` current extract · `CD` chronological extract · `HD` historical extract ·
-`DK` filed-documents register · `SI` structured XML data · `VÖ` announcements · `UT` holder data.
+`SI` structured XML (XJustiz) · `VÖ` announcements · `UT` holder data. (`DK`, the filed-documents
+register, is accessed via `list_filed_documents` / `get_shareholders` / `fetch_filed_document`.)
 
-A search result row looks like:
+`get_shareholders("Art of X UG (haftungsbeschränkt)")` returns:
 
 ```json
 {
-  "row_index": 0,
-  "name": "GASAG AG",
-  "court": "Amtsgericht Charlottenburg (Berlin) HRB 44343 B",
-  "register_number": "HRB 44343 B",
-  "state": "Berlin",
-  "status": "currently registered",
-  "history": [],
-  "available_documents": ["AD", "CD", "DK", "HD", "SI", "UT"]
+  "company": {"name": "Art of X UG (haftungsbeschränkt)", "register_number": "HRB 266185"},
+  "source_document": {"label": "List of shareholders … on 17/10/2025", "date": "2025-10-17"},
+  "stammkapital_eur": 1000.0,
+  "shareholders": [
+    {"shareholder": "Studio Friedrich von Borries UG (haftungsbeschränkt)",
+     "type": "company", "register": "AG Charlottenburg HRB 277734 B", "city": "Berlin",
+     "shares": "3 - 502", "nominal_total_eur": 500.0, "percent": "50%"},
+    {"shareholder": "IKAROS Ventures GmbH", "type": "company",
+     "register": "AG Frankfurt/Oder HRB 19554 FF", "city": "Biesenthal",
+     "shares": "503 - 1.002", "nominal_total_eur": 500.0, "percent": "50%"}
+  ],
+  "confidence": "high",
+  "markdown": "| shareholder | type | … |"
 }
 ```
+
+> **Shareholders are not in the register extract** for a GmbH/UG — they exist only in the
+> separately filed Gesellschafterliste, which `get_shareholders` downloads and parses. Layouts
+> vary by notary; the parser flags `confidence: "low"` and returns `raw_text` when unsure.
 
 ## ⚠️ Legal & rate limits — read this
 
