@@ -61,6 +61,11 @@ pip install -e ".[ocr]"
 brew install tesseract tesseract-lang   # macOS; provides the Tesseract binary + German pack
 ```
 
+> **License note on the OCR extra:** `[ocr]` pulls in [PyMuPDF](https://pymupdf.readthedocs.io),
+> which is **AGPL-3.0 / commercial** dual-licensed. The core package (without `[ocr]`) is fully
+> permissive. If you redistribute a product built on the OCR path, mind AGPL's terms or obtain a
+> commercial PyMuPDF license.
+
 ## Connect it to an MCP client
 
 **Claude Code**
