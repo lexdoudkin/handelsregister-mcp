@@ -29,13 +29,20 @@ a ready-to-render `markdown` table and keep the source text for verification.
 
 | Tool | What it does |
 |------|--------------|
-| `search_company(keywords, match="all", max_results=20)` | Search by name/keywords. `match` ∈ `all` \| `min` \| `exact`. Supports `*` and `?` wildcards. |
-| `get_company(name)` | Exact-name lookup; returns the single best match. |
-| `get_shareholders(company, which="latest")` | **Shareholders as a table** — finds & downloads the filed Gesellschafterliste and parses `{shareholder, type, register, city, shares, nominal_total_eur, percent}`. |
+| `search_company(keywords, match="all", similar=False, max_results=20)` | Search by name/keywords. `match` ∈ `all` \| `min` \| `exact`. `similar=True` enables phonetic matching. Supports `*` and `?` wildcards. |
+| `get_company(name)` | Name lookup. Exact name → the record; inexact/ambiguous → `found: false` + ranked **`suggestions`**. |
+| `get_shareholders(company, which="latest")` | **Shareholders as a table** — resolves the name (suggests if inexact), downloads the filed Gesellschafterliste, and extracts `{shareholder, type, city, register, date_of_birth, shares, nominal_total_eur, percent}`. |
 | `list_filed_documents(company)` | List everything filed in the DK register, grouped by category (shareholder lists, articles of association, annual accounts, …) with dates. |
 | `fetch_filed_document(company, category, which="latest")` | Download any filed document by category and return its text (+ shareholder table for share lists). |
 | `fetch_document(keywords, document_type="AD", ...)` | Download a register extract. `AD`/`CD`/`HD` return parsed company fields + management table; `SI` returns parsed XJustiz data. |
 | `rate_limit_status()` | Remaining requests in the current hour. |
+
+### Fuzzy name resolution
+
+`get_company` and `get_shareholders` don't need the exact registered name. They try an
+exact match first; if that misses, they fall back to keyword + the portal's phonetic search,
+rank the candidates, and return **`suggestions`** so the agent (or user) can pick — e.g.
+`get_shareholders("Trade Republic")` → suggestions `["Trade Republic Bank GmbH", …]`.
 
 **Document types:** `AD` current extract · `CD` chronological extract · `HD` historical extract ·
 `SI` structured XML (XJustiz) · `VÖ` announcements · `UT` holder data. (`DK`, the filed-documents
@@ -64,6 +71,43 @@ register, is accessed via `list_filed_documents` / `get_shareholders` / `fetch_f
 > **Shareholders are not in the register extract** for a GmbH/UG — they exist only in the
 > separately filed Gesellschafterliste, which `get_shareholders` downloads and parses. Layouts
 > vary by notary; the parser flags `confidence: "low"` and returns `raw_text` when unsure.
+
+## How shareholder extraction works (layered)
+
+The Gesellschafterliste has no standard layout, so extraction is layered — strongest engine
+first, each only used if the previous one isn't confident:
+
+1. **Coordinate-aware table parsing** (`pdfplumber`) — rebuilds columns from the PDF's ruling
+   lines / text positions. Handles complex and **bilingual** cap tables (e.g. Trade Republic's
+   74-shareholder German/English list) where flat text extraction garbles the column order.
+2. **Text heuristic** — the standard single-language notarial template.
+3. **LLM analyze** (optional) — see below.
+
+The response's `method` field tells you which engine produced the table (`pdfplumber`,
+`line-heuristic`, or `llm:…`), and `confidence: "low"` ships the `raw_text` for fallback.
+
+## LLM analyze fallback (optional)
+
+For genuinely hard lists — scanned images, or unusual layouts the parsers can't reconstruct —
+the server can hand the document to **Claude**: page **images** (vision) when a PDF is
+available, otherwise the recovered text, returning a structured shareholder table via
+structured outputs. This directly addresses scanned/complex lists where coordinate parsing
+can't recover the table structure.
+
+Off unless an API key is present:
+
+```bash
+pip install "handelsregister-mcp[llm]"     # anthropic SDK + pymupdf (for page images)
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `HANDELSREGISTER_LLM` | `auto` | `auto` (on when a key is present) or `off`. |
+| `HANDELSREGISTER_LLM_MODEL` | `claude-opus-4-8` | Model used for extraction. |
+
+It only fires when the deterministic parsers return low confidence, so it adds cost/latency
+only on the hard cases — never on the standard digital lists those engines already nail.
 
 ## OCR (scanned / image-only documents)
 

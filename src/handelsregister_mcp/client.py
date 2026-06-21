@@ -108,6 +108,7 @@ class HandelsregisterClient:
         keywords: str,
         match: str = "all",
         *,
+        similar: bool = False,
         register_type: str | None = None,
         register_number: str | None = None,
         postal_code: str | None = None,
@@ -115,9 +116,10 @@ class HandelsregisterClient:
     ) -> list[dict]:
         """Run an advanced search and return the parsed result rows.
 
-        `match` is one of "all", "min", "exact". The remaining filters are applied
-        only if the live form exposes the corresponding control (the portal markup
-        changes occasionally), otherwise they are silently ignored.
+        `match` is one of "all", "min", "exact". `similar=True` enables the portal's
+        phonetic ("ähnlich lautende Schlagwörter") matching, which tolerates typos and
+        spelling variants. The remaining filters are applied only if the live form
+        exposes the corresponding control, otherwise they are silently ignored.
         """
         if match not in KEYWORD_OPTIONS:
             raise ValueError(f"match must be one of {sorted(KEYWORD_OPTIONS)}")
@@ -137,6 +139,17 @@ class HandelsregisterClient:
         self.browser.select_form(name="form")
         self.browser["form:schlagwoerter"] = keywords
         self.browser["form:schlagwortOptionen"] = [KEYWORD_OPTIONS[match]]
+
+        if similar:  # phonetic matching checkbox (tolerates typos / spelling variants)
+            for ctrl_name in ("form:aenlichLautendeSchlagwoerterBoolChkbox_input",
+                              "form:aenlichLautendeSchlagwoerterBoolChkbox"):
+                try:
+                    ctrl = self.browser.find_control(ctrl_name)
+                    for item in ctrl.items:
+                        item.selected = True
+                    break
+                except (mechanize.ControlNotFoundError, AttributeError):
+                    continue
 
         self._safe_set("form:registerArt_input", register_type)
         self._safe_set("form:registerNummer", register_number)

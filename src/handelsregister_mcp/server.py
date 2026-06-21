@@ -18,7 +18,9 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 import re
+from difflib import SequenceMatcher
 
+from . import llm
 from .client import (
     DOCUMENT_TYPES,
     KEYWORD_OPTIONS,
@@ -27,10 +29,56 @@ from .client import (
 )
 from .parsers import (
     company_to_markdown,
-    parse_gesellschafterliste,
+    extract_shareholders,
     to_markdown_table,
 )
 from .ratelimit import RateLimiter, RateLimitError
+
+_SHAREHOLDER_COLUMNS = ["shareholder", "type", "city", "register",
+                       "date_of_birth", "shares", "nominal_total_eur", "percent"]
+
+
+def _sim(query: str, name: str) -> float:
+    """Similarity of `query` to a company `name`, substring-aware so that a partial
+    name ("GASAG" in "GASAG AG") scores high even though the strings differ in length."""
+    q, n = (query or "").lower().strip(), (name or "").lower()
+    if not n:
+        return 0.0
+    ratio = SequenceMatcher(None, q, n).ratio()
+    return max(ratio, 0.85) if q and q in n else ratio
+
+
+def _rank(query: str, hits: list[dict], min_sim: float = 0.0) -> list[dict]:
+    scored = [(_sim(query, h.get("name") or ""), h) for h in hits]
+    scored = sorted((p for p in scored if p[0] >= min_sim), key=lambda p: p[0], reverse=True)
+    return [{"name": h["name"], "register_number": h["register_number"], "state": h["state"]}
+            for _, h in scored[:6]]
+
+
+def _resolve_company(query: str):
+    """Resolve a company name. Exact match → proceed; otherwise → suggestions.
+
+    Returns (client, company, suggestions). When exactly resolved, `client` has just
+    searched the company (so its DK links are live for follow-up). Otherwise
+    `suggestions` is a ranked, noise-filtered shortlist of available companies and the
+    caller should ask the user to pick. Consumes the rate-limit budget per search.
+    """
+    _limiter.check_and_consume()
+    client = _new_client()
+    exact = client.search(query, match="exact")
+    if len(exact) == 1:
+        return client, exact[0], []
+    if len(exact) > 1:
+        return None, None, _rank(query, exact)
+
+    # No exact hit — keyword search, then the portal's phonetic search as a last resort.
+    _limiter.check_and_consume()
+    hits = _new_client().search(query, match="all")
+    if not hits:
+        _limiter.check_and_consume()
+        hits = _new_client().search(query, match="all", similar=True)
+    # Filter out phonetic/keyword noise — keep only names actually close to the query.
+    return None, None, _rank(query, hits, min_sim=0.45)
 
 mcp = FastMCP("handelsregister")
 
@@ -48,13 +96,16 @@ def _new_client() -> HandelsregisterClient:
 
 
 @mcp.tool()
-def search_company(keywords: str, match: str = "all", max_results: int = 20) -> dict:
+def search_company(keywords: str, match: str = "all", similar: bool = False,
+                   max_results: int = 20) -> dict:
     """Search the German commercial register (Handelsregister) for companies.
 
     Args:
         keywords: Company name or search terms. Wildcards `*` and `?` are supported.
         match: How keywords are matched — "all" (contains every keyword, default),
             "min" (contains at least one), or "exact" (exact company name).
+        similar: Enable the portal's phonetic ("ähnlich lautende") matching to
+            tolerate typos and spelling variants.
         max_results: Cap on returned rows (the portal page holds up to ~100).
 
     Returns a dict with the query echo, a result count, the remaining hourly request
@@ -71,14 +122,14 @@ def search_company(keywords: str, match: str = "all", max_results: int = 20) -> 
 
     client = _new_client()
     try:
-        results = client.search(keywords, match=match)
+        results = client.search(keywords, match=match, similar=similar)
     except RegisterError as exc:
         return {"error": str(exc)}
     except Exception as exc:  # noqa: BLE001 - surface portal/markup failures to the agent
         return {"error": f"Portal request failed: {exc}"}
 
     response = {
-        "query": {"keywords": keywords, "match": match},
+        "query": {"keywords": keywords, "match": match, "similar": similar},
         "count": len(results),
         "results": results[:max_results],
         "rate_limit": _limiter.status(),
@@ -91,25 +142,27 @@ def search_company(keywords: str, match: str = "all", max_results: int = 20) -> 
 
 @mcp.tool()
 def get_company(name: str) -> dict:
-    """Look up a single company by its exact name and return the best match.
+    """Look up a company by name and return the best match — or suggestions.
 
-    Convenience wrapper over `search_company` with match="exact". Use this when you
-    already know the precise company name and just want one record (including the
-    document types available for `fetch_document`).
+    Tries an exact match first, then falls back to fuzzy + phonetic search. If the
+    name is precise enough it returns the company; if it's ambiguous or only close,
+    it returns `found: false` plus ranked `suggestions` so the caller can pick one.
     """
     try:
-        _limiter.check_and_consume()
+        client, company, suggestions = _resolve_company(name)
     except RateLimitError as exc:
         return {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds}
-
-    try:
-        results = _new_client().search(name, match="exact")
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Portal request failed: {exc}"}
 
-    if not results:
-        return {"found": False, "query": name, "rate_limit": _limiter.status()}
-    return {"found": True, "company": results[0], "rate_limit": _limiter.status()}
+    if company:
+        return {"found": True, "company": company, "rate_limit": _limiter.status()}
+    return {
+        "found": False, "query": name, "suggestions": suggestions,
+        "hint": "No confident match. Pick a name from suggestions and call again."
+                if suggestions else "No companies found for this name.",
+        "rate_limit": _limiter.status(),
+    }
 
 
 @mcp.tool()
@@ -192,65 +245,80 @@ def list_filed_documents(company: str, match: str = "exact", result_index: int =
 
 
 @mcp.tool()
-def get_shareholders(company: str, which: str = "latest", match: str = "exact") -> dict:
+def get_shareholders(company: str, which: str = "latest") -> dict:
     """Retrieve a company's shareholders (Gesellschafterliste) as a structured table.
 
-    Finds the company, locates the filed shareholder list (newest by default, or
-    `which="oldest"`), downloads it, and parses it into rows of
-    {shareholder, type, register, city, shares, nominal_total_eur, percent}.
+    Resolves the company name (exact → fuzzy → phonetic; returns `suggestions` if
+    ambiguous), locates the filed shareholder list (newest by default, or
+    `which="oldest"`), downloads it, and extracts rows of
+    {shareholder, type, city, register, date_of_birth, shares, nominal_total_eur, percent}.
 
-    Shareholders are NOT in the register extract for a GmbH/UG — they live only in
-    this separately filed list, so this is the authoritative source. Layout varies
-    by notary; `confidence` flags low-certainty parses and `raw_text` is included.
+    Extraction is layered: a coordinate-aware table parser (handles complex/bilingual
+    cap tables), then a text heuristic, then — if configured with ANTHROPIC_API_KEY —
+    an LLM that analyzes the page images/text for scanned or unusual layouts. `method`
+    reports which engine produced the result; `confidence: "low"` ships `raw_text`.
+
+    Shareholders are NOT in the register extract for a GmbH/UG — this filed list is
+    the authoritative source.
     """
     try:
-        _limiter.check_and_consume()  # discovery
+        discover, target, suggestions = _resolve_company(company)
     except RateLimitError as exc:
         return {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Portal request failed: {exc}"}
+    if not target:
+        return {
+            "found": False, "query": company, "suggestions": suggestions,
+            "hint": "No confident company match. Pick a name from suggestions and call again."
+                    if suggestions else "No company found for this name.",
+            "rate_limit": _limiter.status(),
+        }
 
-    discover = _new_client()
     try:
-        results = discover.search(company, match=match)
-        if not results:
-            return {"error": f"No company found for {company!r} (match={match})."}
-        target = results[0]
         catalog = discover.list_filed_documents(target["row_index"])
     except Exception as exc:  # noqa: BLE001
-        return {"error": f"Could not open the document register: {exc}"}
+        return {"error": f"Could not open the document register: {exc}", "company": target}
 
     category = next((k for k in catalog if re.search(r"shareholder|gesellschafter", k, re.I)), None)
     docs = catalog.get(category or "", [])
     if not docs:
         return {"error": "No shareholder list is filed for this company.",
-                "company": target, "available_categories": list(catalog)}
+                "company": target, "available_categories": list(catalog),
+                "rate_limit": _limiter.status()}
     docs = sorted(docs, key=lambda d: d.get("date") or "", reverse=(which != "oldest"))
     chosen = docs[0]
 
     try:
-        _limiter.check_and_consume()  # download
+        _limiter.check_and_consume()  # download session
     except RateLimitError as exc:
         return {"error": str(exc), "retry_after_seconds": exc.retry_after_seconds}
 
     fetcher = _new_client()
     try:
-        fetcher.search(company, match=match)
-        doc = fetcher.download_filed_document(target["row_index"], chosen["rowkey"])
+        hits = fetcher.search(target["name"], match="exact")
+        idx = hits[0]["row_index"] if hits else 0
+        doc = fetcher.download_filed_document(idx, chosen["rowkey"])
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Could not download the shareholder list: {exc}", "company": target}
 
-    parsed = parse_gesellschafterliste(doc.get("text", ""))
+    result = extract_shareholders(doc["path"], doc.get("text", ""), doc.get("text_source", "text-layer"))
+    if result.get("confidence") != "high":  # LLM "analyze" fallback for hard layouts
+        llm_res = llm.extract_shareholders_llm(pdf_path=doc.get("path"), text=doc.get("text"))
+        if llm_res and llm_res.get("shareholders"):
+            result = llm_res
+
+    shareholders = result.get("shareholders", [])
     return {
         "company": target,
         "source_document": {"label": chosen["label"], "date": chosen["date"],
                             "path": doc["path"], "text_source": doc.get("text_source")},
-        "stammkapital_eur": parsed["stammkapital_eur"],
-        "shareholders": parsed["shareholders"],
-        "confidence": parsed["confidence"],
-        "markdown": to_markdown_table(
-            parsed["shareholders"],
-            ["shareholder", "type", "register", "city", "shares", "nominal_total_eur", "percent"],
-        ) if parsed["shareholders"] else None,
-        "raw_text": parsed["raw_text"] if parsed["confidence"] == "low" else None,
+        "method": result.get("method"),
+        "stammkapital_eur": result.get("stammkapital_eur"),
+        "shareholders": shareholders,
+        "confidence": result.get("confidence"),
+        "markdown": to_markdown_table(shareholders, _SHAREHOLDER_COLUMNS) if shareholders else None,
+        "raw_text": result.get("raw_text") if result.get("confidence") == "low" else None,
         "rate_limit": _limiter.status(),
     }
 
@@ -302,13 +370,17 @@ def fetch_filed_document(company: str, category: str, which: str = "latest",
     out = {"company": target, "category": key,
            "source_document": {"label": chosen["label"], "date": chosen["date"]},
            "document": doc, "rate_limit": _limiter.status()}
-    if re.search(r"shareholder|gesellschafter", key or "", re.I) and doc.get("text"):
-        parsed = parse_gesellschafterliste(doc["text"])
-        out["shareholders"] = parsed["shareholders"]
-        out["markdown"] = to_markdown_table(
-            parsed["shareholders"],
-            ["shareholder", "type", "register", "city", "shares", "nominal_total_eur", "percent"],
-        ) if parsed["shareholders"] else None
+    if re.search(r"shareholder|gesellschafter", key or "", re.I):
+        result = extract_shareholders(doc["path"], doc.get("text", ""),
+                                      doc.get("text_source", "text-layer"))
+        if result.get("confidence") != "high":
+            llm_res = llm.extract_shareholders_llm(pdf_path=doc.get("path"), text=doc.get("text"))
+            if llm_res and llm_res.get("shareholders"):
+                result = llm_res
+        sh = result.get("shareholders", [])
+        out["method"] = result.get("method")
+        out["shareholders"] = sh
+        out["markdown"] = to_markdown_table(sh, _SHAREHOLDER_COLUMNS) if sh else None
     return out
 
 

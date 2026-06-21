@@ -292,6 +292,138 @@ def parse_xjustiz_si(xml: str | bytes) -> dict:
 
 # ----------------------------------------------------- Gesellschafterliste (PDF)
 
+def _map_shareholder_columns(cells: list[str]) -> dict:
+    """Map a (bilingual) header row to column roles by keyword."""
+    roles: dict[str, int] = {}
+    for i, cell in enumerate(cells):
+        c = (cell or "").lower()
+        if "gesellschafter" in c or "shareholder" in c:
+            roles.setdefault("name", i)
+        elif "summe der nennbet" in c or "total nominal" in c:
+            roles.setdefault("total_nominal", i)
+        elif "gesamt" in c or "total percentage" in c:
+            roles.setdefault("total_percent", i)
+        elif "lfd" in c or "seq" in c or "nr. der" in c:
+            roles.setdefault("shares", i)
+    return roles
+
+
+def parse_gesellschafterliste_pdf(path) -> dict:
+    """Coordinate-aware shareholder extraction using pdfplumber's table model.
+
+    Reconstructs columns from the PDF's ruling lines / text positions, so it
+    handles multi-column and bilingual lists (where flat text extraction garbles
+    the reading order). Falls back to {} when pdfplumber is unavailable or the PDF
+    has no detectable table (e.g. scanned images).
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        return {"shareholders": [], "confidence": "low", "method": "pdfplumber-unavailable"}
+
+    shareholders: list[dict] = []
+    roles: dict | None = None
+    stammkapital = None
+    try:
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                for table in page.extract_tables():
+                    for row in table or []:
+                        cells = [(c or "").replace("\n", " ").strip() for c in row]
+                        joined = " ".join(cells).lower()
+                        if "stammkapital" in joined or "share capital" in joined:
+                            sk = re.search(r"([\d.]+,\d{2})\s*€", joined)
+                            if sk and stammkapital is None:
+                                stammkapital = _money_to_float(sk.group(1))
+                        if roles is None and ("gesellschafter" in joined or "shareholder" in joined):
+                            roles = _map_shareholder_columns(cells)
+                            continue
+                        if not roles:
+                            continue
+                        name_cell = _cell(cells, roles.get("name"))
+                        total = _cell(cells, roles.get("total_nominal"))
+                        if not name_cell or not re.search(r"\d", total):
+                            continue
+                        party = _parse_shareholder_party(name_cell)
+                        shareholders.append({
+                            "shareholder": party["name"],
+                            "type": party["type"],
+                            "city": party["city"],
+                            "register": party["register"],
+                            "date_of_birth": party["date_of_birth"],
+                            "shares": _clean(_cell(cells, roles.get("shares"))) or None,
+                            "nominal_total_eur": _money_to_float(total),
+                            "percent": _clean(_cell(cells, roles.get("total_percent"))) or None,
+                        })
+    except Exception as exc:  # noqa: BLE001 - any pdfplumber failure -> let caller fall back
+        return {"shareholders": [], "confidence": "low", "method": f"pdfplumber-error: {exc}"}
+
+    confidence = "high" if shareholders else "low"
+    return {
+        "shareholders": shareholders,
+        "stammkapital_eur": stammkapital or (
+            round(sum(s["nominal_total_eur"] for s in shareholders if s["nominal_total_eur"]), 2)
+            or None
+        ),
+        "confidence": confidence,
+        "method": "pdfplumber",
+    }
+
+
+def _cell(cells: list[str], idx: int | None) -> str:
+    return cells[idx] if idx is not None and 0 <= idx < len(cells) else ""
+
+
+_GERMAN_MONTHS = {
+    "januar": "01", "februar": "02", "märz": "03", "april": "04", "mai": "05",
+    "juni": "06", "juli": "07", "august": "08", "september": "09",
+    "oktober": "10", "november": "11", "dezember": "12",
+}
+
+
+def _parse_shareholder_party(cell: str) -> dict:
+    """Split a (bilingual) shareholder cell into name/city/register/type/DOB.
+
+    Cells look like: "<Name> mit Sitz in <Stadt> with registered office in <City>
+    <Registergericht> <num> ..." for companies, or "<Name> geboren am <Datum>
+    born on ... wohnhaft in <Stadt> ..." for natural persons.
+    """
+    text = re.sub(r"\s+", " ", cell.replace("\n", " ")).strip()
+
+    # Name is everything before the first locality/birth marker (German or English).
+    name = re.split(
+        r"\bmit Sitz\b|\bwith registered office\b|\bgeboren am\b|\bborn on\b|"
+        r"\bwohnhaft\b|\bhandelnd durch\b|\bvertreten durch\b",
+        text,
+    )[0].strip(" ,")
+
+    is_person = bool(re.search(r"\bgeboren am\b|\bborn on\b", text))
+
+    city = None
+    cm = (re.search(r"mit Sitz (?:in|auf)\s+(.+?)\s+with registered office", text)
+          or re.search(r"wohnhaft in\s+(.+?)\s+resident in", text))
+    if cm:
+        city = cm.group(1).strip(" ,")
+
+    register = None
+    rm = re.search(r"Amtsgericht\s+[\wäöüß./-]+\s+(?:HRA|HRB|GnR|VR|PR)\s*\d+\s*[A-Z]{0,2}\b", text)
+    if rm:
+        register = rm.group(0).strip()
+
+    dob = None
+    dm = re.search(r"geboren am\s+(\d{1,2})\.\s*([A-Za-zäöü]+)\s+(\d{4})", text)
+    if dm and dm.group(2).lower() in _GERMAN_MONTHS:
+        dob = f"{dm.group(3)}-{_GERMAN_MONTHS[dm.group(2).lower()]}-{int(dm.group(1)):02d}"
+
+    return {
+        "name": _clean(name) or None,
+        "type": "person" if is_person else "company",
+        "city": city,
+        "register": register,
+        "date_of_birth": dob,
+    }
+
+
 # A data row of the standard list pairs an amount (…€) with a percentage (…%).
 _DATA_ROW_RE = re.compile(r"\d[\d.]*,\d{2}\s*€.*?\d+(?:,\d+)?\s*%")
 _REGISTER_RE = re.compile(r"(?:AG|Amtsgericht)\s+.+?\b(?:HRA|HRB|GnR|VR|PR)\s*\d+\s*[A-Z]*", re.I)
@@ -376,6 +508,33 @@ def parse_gesellschafterliste(text: str) -> dict:
 
 
 # ----------------------------------------------------------------- rendering
+
+
+def extract_shareholders(pdf_path, text: str, text_source: str = "text-layer") -> dict:
+    """Layered shareholder extraction, best engine first.
+
+    1. coordinate-aware table parsing (pdfplumber) — best for digital, multi-column
+       and bilingual lists where flat text loses the column structure;
+    2. flat-text line heuristic — the simple notarial template;
+    3. give up cleanly — return the best partial result plus `raw_text`, flagged
+       low so the caller (or an LLM fallback) can take over.
+    """
+    table = parse_gesellschafterliste_pdf(pdf_path)
+    if table.get("confidence") == "high":
+        table["list_date"] = _iso_date(text or "")
+        return table
+
+    heur = parse_gesellschafterliste(text or "")
+    if heur.get("confidence") == "high":
+        heur["method"] = "line-heuristic"
+        return heur
+
+    best = table if table.get("shareholders") else heur
+    best["method"] = best.get("method", "none")
+    best["confidence"] = "low"
+    best["raw_text"] = text
+    best["text_source"] = text_source
+    return best
 
 
 def to_markdown_table(rows: list[dict], columns: list[str] | None = None) -> str:
