@@ -20,7 +20,6 @@ from mcp.server.fastmcp import FastMCP
 import re
 from difflib import SequenceMatcher
 
-from . import llm
 from .client import (
     DOCUMENT_TYPES,
     KEYWORD_OPTIONS,
@@ -253,10 +252,10 @@ def get_shareholders(company: str, which: str = "latest") -> dict:
     `which="oldest"`), downloads it, and extracts rows of
     {shareholder, type, city, register, date_of_birth, shares, nominal_total_eur, percent}.
 
-    Extraction is layered: a coordinate-aware table parser (handles complex/bilingual
-    cap tables), then a text heuristic, then — if configured with ANTHROPIC_API_KEY —
-    an LLM that analyzes the page images/text for scanned or unusual layouts. `method`
-    reports which engine produced the result; `confidence: "low"` ships `raw_text`.
+    Extraction is deterministic and layered: a coordinate-aware table parser (handles
+    complex/bilingual cap tables), then a text heuristic. `method` reports which engine
+    produced the result. On `confidence: "low"` the server does not guess — it returns
+    `raw_text` and the PDF `path` so the calling agent can extract the table itself.
 
     Shareholders are NOT in the register extract for a GmbH/UG — this filed list is
     the authoritative source.
@@ -303,12 +302,8 @@ def get_shareholders(company: str, which: str = "latest") -> dict:
         return {"error": f"Could not download the shareholder list: {exc}", "company": target}
 
     result = extract_shareholders(doc["path"], doc.get("text", ""), doc.get("text_source", "text-layer"))
-    if result.get("confidence") != "high":  # LLM "analyze" fallback for hard layouts
-        llm_res = llm.extract_shareholders_llm(pdf_path=doc.get("path"), text=doc.get("text"))
-        if llm_res and llm_res.get("shareholders"):
-            result = llm_res
-
     shareholders = result.get("shareholders", [])
+    low = result.get("confidence") == "low"
     return {
         "company": target,
         "source_document": {"label": chosen["label"], "date": chosen["date"],
@@ -318,7 +313,11 @@ def get_shareholders(company: str, which: str = "latest") -> dict:
         "shareholders": shareholders,
         "confidence": result.get("confidence"),
         "markdown": to_markdown_table(shareholders, _SHAREHOLDER_COLUMNS) if shareholders else None,
-        "raw_text": result.get("raw_text") if result.get("confidence") == "low" else None,
+        # Low confidence → the deterministic parsers couldn't reconstruct the table.
+        # Surface the raw text + file path so the calling agent can read it directly.
+        "raw_text": result.get("raw_text") if low else None,
+        "hint": "Low-confidence parse: extract the shareholders yourself from `raw_text` "
+                "or the PDF at source_document.path." if low else None,
         "rate_limit": _limiter.status(),
     }
 
@@ -373,12 +372,9 @@ def fetch_filed_document(company: str, category: str, which: str = "latest",
     if re.search(r"shareholder|gesellschafter", key or "", re.I):
         result = extract_shareholders(doc["path"], doc.get("text", ""),
                                       doc.get("text_source", "text-layer"))
-        if result.get("confidence") != "high":
-            llm_res = llm.extract_shareholders_llm(pdf_path=doc.get("path"), text=doc.get("text"))
-            if llm_res and llm_res.get("shareholders"):
-                result = llm_res
         sh = result.get("shareholders", [])
         out["method"] = result.get("method")
+        out["confidence"] = result.get("confidence")
         out["shareholders"] = sh
         out["markdown"] = to_markdown_table(sh, _SHAREHOLDER_COLUMNS) if sh else None
     return out

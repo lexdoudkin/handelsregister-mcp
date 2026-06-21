@@ -28,9 +28,6 @@ dependencies = [
 # OCR fallback for scanned/image-only PDFs. Also needs the system Tesseract binary
 # and its German language pack (e.g. `brew install tesseract tesseract-lang`).
 ocr = ["pymupdf>=1.24", "pytesseract>=0.3.10", "Pillow>=10.0"]
-# LLM "analyze" fallback for scanned/complex shareholder lists (needs ANTHROPIC_API_KEY).
-# pymupdf (from the ocr extra) is used to send page images to Claude's vision.
-llm = ["anthropic>=0.40", "pymupdf>=1.24"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.urls]

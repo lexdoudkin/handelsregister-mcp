@@ -81,33 +81,14 @@ first, each only used if the previous one isn't confident:
    lines / text positions. Handles complex and **bilingual** cap tables (e.g. Trade Republic's
    74-shareholder German/English list) where flat text extraction garbles the column order.
 2. **Text heuristic** — the standard single-language notarial template.
-3. **LLM analyze** (optional) — see below.
 
-The response's `method` field tells you which engine produced the table (`pdfplumber`,
-`line-heuristic`, or `llm:…`), and `confidence: "low"` ships the `raw_text` for fallback.
+The response's `method` field tells you which engine produced the table (`pdfplumber` or
+`line-heuristic`).
 
-## LLM analyze fallback (optional)
-
-For genuinely hard lists — scanned images, or unusual layouts the parsers can't reconstruct —
-the server can hand the document to **Claude**: page **images** (vision) when a PDF is
-available, otherwise the recovered text, returning a structured shareholder table via
-structured outputs. This directly addresses scanned/complex lists where coordinate parsing
-can't recover the table structure.
-
-Off unless an API key is present:
-
-```bash
-pip install "handelsregister-mcp[llm]"     # anthropic SDK + pymupdf (for page images)
-export ANTHROPIC_API_KEY=sk-ant-...
-```
-
-| Env var | Default | Purpose |
-|---|---|---|
-| `HANDELSREGISTER_LLM` | `auto` | `auto` (on when a key is present) or `off`. |
-| `HANDELSREGISTER_LLM_MODEL` | `claude-opus-4-8` | Model used for extraction. |
-
-It only fires when the deterministic parsers return low confidence, so it adds cost/latency
-only on the hard cases — never on the standard digital lists those engines already nail.
+**This server is deterministic — it does not call an LLM.** When neither parser is confident
+(`confidence: "low"`), it doesn't guess: it returns the `raw_text` and the downloaded PDF
+`path`, and an agent consuming this MCP can read those and extract the table itself. The
+"analyze the hard ones" intelligence lives in the calling agent, not inside the data tool.
 
 ## OCR (scanned / image-only documents)
 

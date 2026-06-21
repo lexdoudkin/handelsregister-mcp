@@ -517,7 +517,7 @@ def extract_shareholders(pdf_path, text: str, text_source: str = "text-layer") -
        and bilingual lists where flat text loses the column structure;
     2. flat-text line heuristic — the simple notarial template;
     3. give up cleanly — return the best partial result plus `raw_text`, flagged
-       low so the caller (or an LLM fallback) can take over.
+       low so the calling agent can read the text/PDF and extract it itself.
     """
     table = parse_gesellschafterliste_pdf(pdf_path)
     if table.get("confidence") == "high":
