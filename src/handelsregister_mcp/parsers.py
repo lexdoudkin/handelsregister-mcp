@@ -117,18 +117,30 @@ def parse_register_extract(text: str) -> dict:
         company["entries_count"] = int(n.group(0)) if n else None
 
     # Seat block: the town is the first proper line (skip hyphenation remnants like
-    # "lassungen" from "Zweignieder-\nlassungen"); an address line usually follows.
+    # "lassungen" from "Zweignieder-\nlassungen"). The domestic business address is
+    # the next line(s) up to and including the first postal code — then stop, so
+    # foreign branches (Zweigniederlassungen with their own EUIDs) aren't absorbed.
     if sections.get("seat"):
         lines = [l.strip() for l in sections["seat"].splitlines() if l.strip()]
-        for l in lines:
+        town_idx = None
+        for i, l in enumerate(lines):
             if re.match(r"^[A-ZÄÖÜ]", l) and not re.search(
                 r"Geschäftsanschrift|empfangsberechtigt|Zweignieder", l
             ):
                 company["registered_office"] = _strip_trailing_marker(l)
+                town_idx = i
                 break
-        addr = [l for l in lines if re.search(r"\d{5}|straße|str\.|platz|weg|allee|campus|ring", l, re.I)]
-        if addr:
-            company["business_address"] = _strip_trailing_marker(", ".join(addr))
+        if town_idx is not None:
+            addr_lines: list[str] = []
+            for l in lines[town_idx + 1:]:
+                if re.search(r"EUID|Zweigniederlassung|Business Register|Handelsregister Abteilung", l, re.I):
+                    break
+                addr_lines.append(l)
+                if re.search(r"\b\d{5}\b", l):  # postal code ends the domestic address
+                    break
+            addr = _strip_trailing_marker(", ".join(addr_lines))
+            if addr and re.search(r"\d{5}|straße|str\.|platz|weg|allee|ring|campus", addr, re.I):
+                company["business_address"] = addr
 
     if sections.get("capital"):
         company["capital"] = _money_to_float(sections["capital"])
