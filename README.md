@@ -1,150 +1,75 @@
 # handelsregister-mcp
 
-An open-source **[Model Context Protocol](https://modelcontextprotocol.io) server** for the
-German commercial register, **[handelsregister.de](https://www.handelsregister.de)**.
+**An open-source [Model Context Protocol](https://modelcontextprotocol.io) server for the German Commercial Register — [handelsregister.de](https://www.handelsregister.de).**
 
-It lets AI agents do the two things people actually use the register for — **search for a
-company** and **retrieve its register documents** — through a clean MCP tool interface,
-instead of clicking through the portal's legacy JSF/PrimeFaces web form by hand.
+Give your AI agents first-class access to official German company data: search the register, read register extracts with management and capital, list filed documents, and pull the **shareholder list (Gesellschafterliste)** — all returned as **structured data and tables**, not raw HTML.
 
-> **Status:** company search is solid and built on the well-tested
-> [bundesAPI/handelsregister](https://github.com/bundesAPI/handelsregister) flow.
-> Document download is wired up but is the most fragile part (it depends on the portal's
-> command-link markup) — verify it against the live portal and open an issue if the IDs drift.
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-server-000000.svg)](https://modelcontextprotocol.io)
+[![Built in](https://img.shields.io/badge/built%20in-Neuland-black.svg)](#das-internet-ist-für-uns-alle-neuland)
 
-## Why this exists
+---
 
-handelsregister.de has **no official API**. It is a server-side JSF application, so every
-request has to carry a session cookie and a server-generated `ViewState` through a multi-step
-form submission. This server reproduces that browser flow with [`mechanize`](https://github.com/python-mechanize/mechanize)
-and exposes the result as MCP tools.
+### „Das Internet ist für uns alle Neuland.“
 
-Since **1 August 2022** (the DiRUG law) both searches and document downloads are **free of charge**.
+In 2013, a German Federal Chancellor stood next to the US President and described the internet as *Neuland* — uncharted new territory. The line became a national meme.
 
-## Tools
+More than a decade later, the official Handelsregister is a living monument to that *Neuland* era: a JavaServer Faces application that threads a server-side `ViewState` through every click, a lazy-loaded PrimeFaces document tree, a strict **60-requests-per-hour** limit baked into its terms of use, and **no public API whatsoever**. Since 2022 the data is free and public by law — yet it stays locked behind a portal that no machine was ever meant to talk to.
 
-Every tool returns **structured data** — search rows, parsed company fields, and
-shareholder/management **tables** — not raw document dumps. Document tools also include
-a ready-to-render `markdown` table and keep the source text for verification.
+That gap is exactly why MCP servers need to exist. An LLM agent can reason brilliantly about a company — *if* something hands it the company's data. This project is that something: a small, deterministic bridge from a relic of *Neuland* to the agents of today.
 
-| Tool | What it does |
-|------|--------------|
-| `search_company(keywords, match="all", similar=False, max_results=20)` | Search by name/keywords. `match` ∈ `all` \| `min` \| `exact`. `similar=True` enables phonetic matching. Supports `*` and `?` wildcards. |
-| `get_company(name)` | Name lookup. Exact name → the record; inexact/ambiguous → `found: false` + ranked **`suggestions`**. |
-| `get_shareholders(company, which="latest")` | **Shareholders as a table** — resolves the name (suggests if inexact), downloads the filed Gesellschafterliste, and extracts `{shareholder, type, city, register, date_of_birth, shares, nominal_total_eur, percent}`. |
-| `list_filed_documents(company)` | List everything filed in the DK register, grouped by category (shareholder lists, articles of association, annual accounts, …) with dates. |
-| `fetch_filed_document(company, category, which="latest")` | Download any filed document by category and return its text (+ shareholder table for share lists). |
-| `fetch_document(keywords, document_type="AD", ...)` | Download a register extract. `AD`/`CD`/`HD` return parsed company fields + management table; `SI` returns parsed XJustiz data. |
-| `rate_limit_status()` | Remaining requests in the current hour. |
+---
 
-### Fuzzy name resolution
+## Features
 
-`get_company` and `get_shareholders` don't need the exact registered name. They try an
-exact match first; if that misses, they fall back to keyword + the portal's phonetic search,
-rank the candidates, and return **`suggestions`** so the agent (or user) can pick — e.g.
-`get_shareholders("Trade Republic")` → suggestions `["Trade Republic Bank GmbH", …]`.
+- 🔎 **Company search** — by name/keywords, with exact, all-keyword, and phonetic matching, plus **fuzzy resolution** that returns ranked suggestions when the name isn't exact.
+- 📄 **Register extracts** (AD / CD / HD) — parsed into structured fields: name, register number, seat, address, capital, business purpose, dates, and a **management table** (Geschäftsführer / Vorstand with birthdates).
+- 🧬 **Structured XJustiz data** (SI) — the machine-readable register payload, parsed.
+- 👥 **Shareholders as a table** — finds and downloads the filed Gesellschafterliste and extracts `{shareholder, type, city, register, date_of_birth, shares, nominal_total_eur, percent}`. Handles complex, multi-page, **bilingual** cap tables.
+- 🗂️ **Filed-document register** — list everything on file (shareholder lists, articles of association, annual accounts, …) and download any of it.
+- 🧾 **OCR fallback** — scanned/image-only PDFs are run through Tesseract so text still comes out.
+- ⏱️ **Polite by design** — a shared 60 req/hour limiter, on-disk caching, descriptive User-Agent.
+- 🧱 **Fully deterministic** — no LLM lives inside the server (see [Design](#design-a-deterministic-tool)).
 
-**Document types:** `AD` current extract · `CD` chronological extract · `HD` historical extract ·
-`SI` structured XML (XJustiz) · `VÖ` announcements · `UT` holder data. (`DK`, the filed-documents
-register, is accessed via `list_filed_documents` / `get_shareholders` / `fetch_filed_document`.)
+## How it works
 
-`get_shareholders("Art of X UG (haftungsbeschränkt)")` returns:
+handelsregister.de exposes **no REST API** — only a JSF/PrimeFaces web form. Every request must carry a session cookie and a server-generated `ViewState` through a multi-step submission. This server reproduces that browser flow with [`mechanize`](https://github.com/python-mechanize/mechanize) and turns the rendered HTML/PDF/XML into clean structured data.
 
-```json
-{
-  "company": {"name": "Art of X UG (haftungsbeschränkt)", "register_number": "HRB 266185"},
-  "source_document": {"label": "List of shareholders … on 17/10/2025", "date": "2025-10-17"},
-  "stammkapital_eur": 1000.0,
-  "shareholders": [
-    {"shareholder": "Studio Friedrich von Borries UG (haftungsbeschränkt)",
-     "type": "company", "register": "AG Charlottenburg HRB 277734 B", "city": "Berlin",
-     "shares": "3 - 502", "nominal_total_eur": 500.0, "percent": "50%"},
-    {"shareholder": "IKAROS Ventures GmbH", "type": "company",
-     "register": "AG Frankfurt/Oder HRB 19554 FF", "city": "Biesenthal",
-     "shares": "503 - 1.002", "nominal_total_eur": 500.0, "percent": "50%"}
-  ],
-  "confidence": "high",
-  "markdown": "| shareholder | type | … |"
-}
-```
+Since **1 August 2022** (the DiRUG law), both searches and document downloads are **free of charge**.
 
-> **Shareholders are not in the register extract** for a GmbH/UG — they exist only in the
-> separately filed Gesellschafterliste, which `get_shareholders` downloads and parses. Layouts
-> vary by notary; the parser flags `confidence: "low"` and returns `raw_text` when unsure.
+## ⚠️ Legal & rate limits — read this first
 
-## How shareholder extraction works (layered)
+The Handelsregister is public, but not a free-for-all to scrape:
 
-The Gesellschafterliste has no standard layout, so extraction is layered — strongest engine
-first, each only used if the previous one isn't confident:
+- Its **Nutzungsordnung** (terms of use, per **§9 HGB**) forbids **more than 60 retrievals per hour**, and the portal FAQ warns that automated mass querying may be treated as a criminal offence (**§§303a, b StGB**).
+- This server enforces a shared **60 requests/hour** limit by default. **Do not raise it to abuse the portal.** For high-volume or commercial use, use a licensed data provider (e.g. [OpenRegister](https://openregister.de), [handelsregister.ai](https://handelsregister.ai)) instead of scraping.
+- Register data contains **personal data** (managing directors, shareholders, birthdates). Handle it under the GDPR and use it only for the informational purposes the register is intended for.
 
-1. **Coordinate-aware table parsing** (`pdfplumber`) — rebuilds columns from the PDF's ruling
-   lines / text positions. Handles complex and **bilingual** cap tables (e.g. Trade Republic's
-   74-shareholder German/English list) where flat text extraction garbles the column order.
-2. **Text heuristic** — the standard single-language notarial template.
-
-The response's `method` field tells you which engine produced the table (`pdfplumber` or
-`line-heuristic`).
-
-**This server is deterministic — it does not call an LLM.** When neither parser is confident
-(`confidence: "low"`), it doesn't guess: it returns the `raw_text` and the downloaded PDF
-`path`, and an agent consuming this MCP can read those and extract the table itself. The
-"analyze the hard ones" intelligence lives in the calling agent, not inside the data tool.
-
-## OCR (scanned / image-only documents)
-
-Newer filings are "digitally born" and have a text layer that `pypdf` reads directly. Older or
-scanned documents (many Gesellschafterlisten, annual accounts, pre-digital articles) are
-**image-only PDFs with no text layer**. For those, the server falls back to **OCR** (Tesseract,
-German), so document tools still return text. The result carries `text_source: "text-layer" | "ocr" | "none"`.
-
-OCR is an **optional extra** (kept out of the core install):
-
-```bash
-pip install "handelsregister-mcp[ocr]"          # python libs (pymupdf, pytesseract, Pillow)
-brew install tesseract tesseract-lang           # the Tesseract binary + language packs (macOS)
-```
-
-| Env var | Default | Purpose |
-|---|---|---|
-| `HANDELSREGISTER_OCR` | `auto` | `auto` (OCR only when the text layer is empty), `always`, or `off`. |
-| `HANDELSREGISTER_OCR_LANG` | `deu` | Tesseract language(s), e.g. `deu+eng`. |
-
-**Caveat — OCR recovers *text*, not table *structure*.** A scanned page is read in a different
-spatial order than a digital one, so the shareholder-table parser can't reliably reconstruct
-columns from OCR output. When it detects this it sets `confidence: "low"` and returns `raw_text`,
-leaving the final extraction to the calling model rather than emitting a confidently-wrong table.
-(Coordinate-based table reconstruction via Tesseract TSV is a possible future improvement.)
-
-## ⚠️ Legal & rate limits — read this
-
-- The portal's **Nutzungsordnung** (terms of use, per **§9 HGB**) forbids **more than 60
-  retrievals per hour**. The portal FAQ warns that automated mass querying beyond this may be
-  treated as a criminal offence (**§§303a, b StGB**).
-- This server enforces a shared **60 requests/hour** sliding-window limit by default. Do **not**
-  raise it to abuse the portal. For high-volume or commercial use, use a licensed data provider
-  (e.g. [OpenRegister](https://openregister.de), [handelsregister.ai](https://handelsregister.ai))
-  instead of scraping.
-- Register data can contain **personal data** — handle it in line with the GDPR and use it only
-  for the informational purposes the register is intended for.
+This is a tool for legitimate, measured lookups — diligence, research, journalism, compliance — not bulk harvesting.
 
 ## Install
 
 ```bash
-git clone <your-fork-url> handelsregister-mcp
+git clone https://github.com/lexdoudkin/handelsregister-mcp.git
 cd handelsregister-mcp
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
+
+# optional: OCR for scanned documents
+pip install -e ".[ocr]"
+brew install tesseract tesseract-lang   # macOS; provides the Tesseract binary + German pack
 ```
 
-## Run
+## Connect it to an MCP client
+
+**Claude Code**
 
 ```bash
-handelsregister-mcp        # serves over stdio
+claude mcp add handelsregister -- handelsregister-mcp
 ```
 
-### Claude Desktop / Claude Code
-
-Add to your MCP config (see [`examples/claude_desktop_config.json`](examples/claude_desktop_config.json)):
+**Claude Desktop** — add to your MCP config (see [`examples/claude_desktop_config.json`](examples/claude_desktop_config.json)):
 
 ```json
 {
@@ -157,31 +82,114 @@ Add to your MCP config (see [`examples/claude_desktop_config.json`](examples/cla
 }
 ```
 
-For Claude Code: `claude mcp add handelsregister -- handelsregister-mcp`.
+Then just ask your agent things like *"Who are the shareholders of Trade Republic Bank GmbH?"* or *"Get the register details and managing directors of GASAG AG."*
 
-### Use the library directly
+## Tools
 
-```python
-from handelsregister_mcp import HandelsregisterClient
+Every tool returns **structured data** — search rows, parsed company fields, and shareholder/management **tables** — plus a ready-to-render `markdown` table for document tools.
 
-client = HandelsregisterClient()
-hits = client.search("GASAG", match="exact")
-doc = client.fetch_document(hits[0]["row_index"], "AD")
-print(doc["text"][:500])
+| Tool | What it does |
+|------|--------------|
+| `search_company(keywords, match="all", similar=False, max_results=20)` | Search by name/keywords. `match` ∈ `all` \| `min` \| `exact`. `similar=True` enables phonetic matching. `*` and `?` wildcards. |
+| `get_company(name)` | Name lookup. Exact name → the record; inexact/ambiguous → `found: false` + ranked **`suggestions`**. |
+| `get_shareholders(company, which="latest")` | **Shareholders as a table** — resolves the name, downloads the filed Gesellschafterliste, and extracts structured rows. |
+| `list_filed_documents(company)` | List everything filed in the DK register, grouped by category, with dates. |
+| `fetch_filed_document(company, category, which="latest")` | Download any filed document by category (+ shareholder table for share lists). |
+| `fetch_document(keywords, document_type="AD", ...)` | Download a register extract. `AD`/`CD`/`HD` → company fields + management table; `SI` → XJustiz data. |
+| `rate_limit_status()` | Remaining requests in the current hour. |
+
+**Document types:** `AD` current extract · `CD` chronological extract · `HD` historical extract · `SI` structured XML (XJustiz) · `VÖ` announcements · `UT` holder data. (`DK`, the filed-documents register, is reached via `list_filed_documents` / `get_shareholders` / `fetch_filed_document`.)
+
+### Example: `get_shareholders`
+
+```jsonc
+// get_shareholders("Trade Republic Bank GmbH")
+{
+  "company": { "name": "Trade Republic Bank GmbH", "register_number": "HRB 244347" },
+  "source_document": { "label": "List of shareholders … on 15/06/2026", "date": "2026-06-15" },
+  "method": "pdfplumber",
+  "confidence": "high",
+  "stammkapital_eur": 96293600.0,
+  "shareholders": [
+    { "shareholder": "Accel Holdings-TR LLC", "type": "company", "city": "Palo Alto, USA",
+      "nominal_total_eur": 13008200.0, "percent": "12,7936%" },
+    { "shareholder": "Creandum V, L.P.", "type": "company", "city": "St. Peter Port",
+      "nominal_total_eur": 12936200.0, "percent": "12,7228%" }
+    // … 74 shareholders total
+  ]
+}
 ```
+
+### Fuzzy name resolution
+
+`get_company` and `get_shareholders` don't need the exact registered name. Exact match → they proceed; otherwise they fall back to keyword + phonetic search, rank the candidates, and return **`suggestions`** — e.g. `get_shareholders("Trade Republic")` → `["Trade Republic Bank GmbH", "Trade Republic Service GmbH", …]`.
+
+## Shareholder extraction (layered & deterministic)
+
+The Gesellschafterliste has no standard layout, so extraction is layered — strongest engine first:
+
+1. **Coordinate-aware table parsing** ([`pdfplumber`](https://github.com/jsvine/pdfplumber)) — rebuilds columns from the PDF's ruling lines / text positions. Handles complex and **bilingual** cap tables (e.g. Trade Republic's 74-shareholder German/English list) that flat text extraction garbles.
+2. **Text heuristic** — the standard single-language notarial template.
+
+The `method` field tells you which engine produced the table.
+
+> **Shareholders are not in the register extract** for a GmbH/UG — they exist only in this separately filed list, which `get_shareholders` downloads and parses.
+
+## Design: a deterministic tool
+
+An MCP server is consumed *by* an LLM agent — so it would be redundant (and non-deterministic) to call another LLM inside it. **This server never calls an LLM.** When neither parser is confident (`confidence: "low"`), it doesn't guess: it returns the `raw_text` and the downloaded PDF `path`, and the calling agent — which is already an LLM — reads those and extracts the table itself. Intelligence lives in the caller; the tool just fetches data, faithfully.
+
+OCR is the one heavyweight step, and it's deterministic too: scanned PDFs are rasterised and run through **Tesseract** (German) so text still comes out.
 
 ## Configuration
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `HANDELSREGISTER_MAX_PER_HOUR` | `60` | Hourly request cap (do not exceed the portal limit). |
+| `HANDELSREGISTER_MAX_PER_HOUR` | `60` | Hourly request cap. **Do not exceed the portal limit.** |
 | `HANDELSREGISTER_DOWNLOAD_DIR` | system temp dir | Where downloaded documents are written. |
+| `HANDELSREGISTER_OCR` | `auto` | OCR for scanned PDFs: `auto` (only when the text layer is empty), `always`, or `off`. |
+| `HANDELSREGISTER_OCR_LANG` | `deu` | Tesseract language(s), e.g. `deu+eng`. |
+
+## Use as a library
+
+```python
+from handelsregister_mcp import HandelsregisterClient
+
+client = HandelsregisterClient()
+hits = client.search("GASAG AG", match="exact")
+doc = client.fetch_document(hits[0]["row_index"], "AD")
+print(doc["structured"]["management"])
+```
+
+## Project layout
+
+```
+src/handelsregister_mcp/
+├── server.py      # MCP tools (FastMCP)
+├── client.py      # the JSF/PrimeFaces portal client (search + documents)
+├── parsers.py     # register extract, XJustiz SI, shareholder-list parsing
+├── ocr.py         # optional Tesseract OCR fallback
+└── ratelimit.py   # shared 60/hour limiter
+```
+
+## Known limitations
+
+- **Scanned tables**: OCR recovers *text* but not table *structure* — those parse low-confidence and return `raw_text` for the caller. Coordinate-based OCR table reconstruction (Tesseract TSV) is a possible future improvement.
+- **Pagination**: fuzzy suggestions are drawn from the first results page; a very common partial query may miss a match that sits on a later page.
+- **Portal markup drift**: the document-register flow depends on the live HTML; if the portal changes, parsing may need a tweak. PRs welcome.
+
+## Contributing
+
+Issues and pull requests are welcome — especially for parser robustness across the many notarial Gesellschafterliste templates, and for additional register document types. Please keep changes deterministic and respectful of the portal's rate limits.
 
 ## Credits
 
-Search flow adapted from [bundesAPI/handelsregister](https://github.com/bundesAPI/handelsregister)
-/ the [`deutschland`](https://github.com/bundesAPI/deutschland) package (Apache-2.0).
+The portal search flow is adapted from the excellent [bundesAPI/handelsregister](https://github.com/bundesAPI/handelsregister) / [`deutschland`](https://github.com/bundesAPI/deutschland) project (Apache-2.0), part of the [bund.dev](https://bund.dev) effort to document and open up Germany's public APIs.
 
 ## License
 
 [Apache-2.0](LICENSE).
+
+## Disclaimer
+
+Not affiliated with the Handelsregister, the German Federal States, or any official body. Use it lawfully and within the portal's terms of use. The maintainers accept no liability for how the data is obtained or used.
