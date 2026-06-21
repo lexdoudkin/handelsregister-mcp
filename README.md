@@ -1,5 +1,7 @@
 # handelsregister-mcp
 
+<!-- mcp-name: io.github.lexdoudkin/handelsregister-mcp -->
+
 **An open-source [Model Context Protocol](https://modelcontextprotocol.io) server for the German Commercial Register — [handelsregister.de](https://www.handelsregister.de).**
 
 Give your AI agents first-class access to official German company data: search the register, read register extracts with management and capital, list filed documents, and pull the **shareholder list (Gesellschafterliste)** — all returned as **structured data and tables**, not raw HTML.
