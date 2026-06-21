@@ -121,22 +121,22 @@ def parse_register_extract(text: str) -> dict:
     # the next line(s) up to and including the first postal code — then stop, so
     # foreign branches (Zweigniederlassungen with their own EUIDs) aren't absorbed.
     if sections.get("seat"):
-        lines = [l.strip() for l in sections["seat"].splitlines() if l.strip()]
+        lines = [ln.strip() for ln in sections["seat"].splitlines() if ln.strip()]
         town_idx = None
-        for i, l in enumerate(lines):
-            if re.match(r"^[A-ZÄÖÜ]", l) and not re.search(
-                r"Geschäftsanschrift|empfangsberechtigt|Zweignieder", l
+        for i, ln in enumerate(lines):
+            if re.match(r"^[A-ZÄÖÜ]", ln) and not re.search(
+                r"Geschäftsanschrift|empfangsberechtigt|Zweignieder", ln
             ):
-                company["registered_office"] = _strip_trailing_marker(l)
+                company["registered_office"] = _strip_trailing_marker(ln)
                 town_idx = i
                 break
         if town_idx is not None:
             addr_lines: list[str] = []
-            for l in lines[town_idx + 1:]:
-                if re.search(r"EUID|Zweigniederlassung|Business Register|Handelsregister Abteilung", l, re.I):
+            for ln in lines[town_idx + 1:]:
+                if re.search(r"EUID|Zweigniederlassung|Business Register|Handelsregister Abteilung", ln, re.I):
                     break
-                addr_lines.append(l)
-                if re.search(r"\b\d{5}\b", l):  # postal code ends the domestic address
+                addr_lines.append(ln)
+                if re.search(r"\b\d{5}\b", ln):  # postal code ends the domestic address
                     break
             addr = _strip_trailing_marker(", ".join(addr_lines))
             if addr and re.search(r"\d{5}|straße|str\.|platz|weg|allee|ring|campus", addr, re.I):
@@ -446,7 +446,7 @@ def parse_gesellschafterliste(text: str) -> dict:
     text = text or ""
     # Join hyphenated line breaks: "haftungsbe-\nschränkt" -> "haftungsbeschränkt".
     joined = re.sub(r"(?<=[a-zäöüß])-\s*\n\s*(?=[a-zäöü])", "", text)
-    lines = [l.strip() for l in joined.splitlines() if l.strip()]
+    lines = [ln.strip() for ln in joined.splitlines() if ln.strip()]
 
     stammkapital = None
     sk = re.search(r"Stammkapital:?\s*([\d.]+,\d{2})\s*€", joined)
@@ -454,10 +454,10 @@ def parse_gesellschafterliste(text: str) -> dict:
         stammkapital = _money_to_float(sk.group(1))
 
     # Index the data rows; everything before the first one is the header.
-    data_idx = [i for i, l in enumerate(lines) if _DATA_ROW_RE.search(l)]
+    data_idx = [i for i, ln in enumerate(lines) if _DATA_ROW_RE.search(ln)]
     shareholders: list[dict] = []
-    prev = max([i for i, l in enumerate(lines)
-                if re.search(r"Veränderung|Nennbetrag", l) and i < (data_idx[0] if data_idx else 0)],
+    prev = max([i for i, ln in enumerate(lines)
+                if re.search(r"Veränderung|Nennbetrag", ln) and i < (data_idx[0] if data_idx else 0)],
                default=-1)
 
     for di in data_idx:
@@ -468,11 +468,14 @@ def parse_gesellschafterliste(text: str) -> dict:
         name_lines: list[str] = []
         idx = len(block) - 1
         if idx >= 0 and not _CHANGE_WORDS.search(block[idx]) and len(block[idx]) < 60:
-            city = block[idx]; idx -= 1
+            city = block[idx]
+            idx -= 1
         if idx >= 0 and _REGISTER_RE.search(block[idx]):
-            register = _clean(block[idx]); idx -= 1
+            register = _clean(block[idx])
+            idx -= 1
         while idx >= 0 and not _CHANGE_WORDS.search(block[idx]):
-            name_lines.insert(0, block[idx]); idx -= 1
+            name_lines.insert(0, block[idx])
+            idx -= 1
         name = _clean(" ".join(name_lines)) or None
 
         row = lines[di]

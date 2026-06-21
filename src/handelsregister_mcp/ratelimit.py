@@ -10,7 +10,6 @@ agent firing tools in a loop cannot blow past the limit.
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import time
 from pathlib import Path
