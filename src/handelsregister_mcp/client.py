@@ -200,8 +200,10 @@ class HandelsregisterClient:
             )
 
         # PrimeFaces command link -> non-ajax JSF postback that streams the file.
+        # Send only the link's own id, as the browser's click does
+        # (PrimeFaces.addSubmitParam). With javax.faces.source added as well, the
+        # portal answers with an error page ("Errorcode: A 110") instead of the file.
         self.browser.select_form(name="ergebnissForm")
-        self.browser.form.new_control("hidden", "javax.faces.source", {"value": control_id})
         self.browser.form.new_control("hidden", control_id, {"value": control_id})
         response = self.browser.submit()
 
